@@ -1,4 +1,7 @@
 import email, html, imaplib, json, os, re, time, urllib.request
+from functools import partial
+
+print = partial(print, flush=True)
 from email.header import decode_header
 
 def env(n, d=""):
@@ -58,7 +61,7 @@ def md_clean(t):
 def build_prompt(subject, sender, account, body):
     return ("তুমি একজন সাহায্যকারী। কাজ: একটি ইমেইল পড়ে খুব সহজ বাংলায় বুঝিয়ে দাও। কঠিন টেকনোলজির ইংরেজি শব্দ থাকলে সহজ বাংলায় অর্থ বুঝিয়ে বলবে। কোনো Markdown চিহ্ন ব্যবহার করবে না। তারা, আন্ডারস্কোর, ব্যাকটিক, হ্যাশ ব্যবহার করবে না। শুধু নিচের ৪টি লেবেল দিয়ে উত্তর দাও, প্রতিটি লেবেল নতুন লাইনে শুরু করবে:\nসারাংশ: সহজ বাংলায় ২ থেকে ৪ বাক্যে মূল কথা\nবিস্তারিত: মেইলটা আসলে কী বোঝাতে চাইছে, কেন পাঠানো হয়েছে\nনিরাপত্তা: মেইলটা নিরাপদ মনে হচ্ছে কিনা, সন্দেহজনক কিছু আছে কিনা, লিংকে চাপ দেওয়া বা পাসওয়ার্ড, OTP, টাকা চাওয়া হয়েছে কিনা\nকরণীয়: ব্যবহারকারীর পরবর্তী পদক্ষেপ কী, কিছু করতে হবে কিনা পরিষ্কার করে বলো\n\n" + f"যে Gmail-এ এসেছে: {account}\nপাঠিয়েছে: {sender}\nবিষয়: {subject}\nইমেইল:\n{body[:7000]}")
 
-def http_json(url, data, headers, timeout=60):
+def http_json(url, data, headers, timeout=30):
     req = urllib.request.Request(url, data=json.dumps(data).encode(), headers=headers, method="POST")
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode())
@@ -76,21 +79,8 @@ def call_gemini(prompt):
     key = env("GEMINI_API_KEY")
     if not key:
         return None
-    models = [env("GEMINI_MODEL", "gemini-3.6-flash"), "gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.5-flash", "gemini-2.0-flash"]
-    seen = []
-    for m in models:
-        if m and m not in seen:
-            seen.append(m)
-    last = None
-    for model in seen:
-        for attempt in range(2):
-            try:
-                return gemini_once(model, key, prompt)
-            except Exception as e:
-                last = e
-                print(f"Gemini {model} attempt {attempt+1} failed:", e)
-                time.sleep(3 + attempt * 5)
-    raise last
+    return gemini_once("gemini-3.6-flash", key, prompt)
+
 
 def call_chat(url, key, models, prompt, extra=None):
     if not key:
@@ -113,10 +103,10 @@ def call_chat(url, key, models, prompt, extra=None):
     raise last
 
 def call_openrouter(prompt):
-    return call_chat("https://openrouter.ai/api/v1/chat/completions", env("OPENROUTER_API_KEY"), [env("OPENROUTER_MODEL", "openrouter/free"), "openrouter/free"], prompt, {"X-Title": "Gmail to Telegram"})
+    return call_chat("https://openrouter.ai/api/v1/chat/completions", env("OPENROUTER_API_KEY"), ["openrouter/free"], prompt, {"X-Title": "Gmail to Telegram"})
 
 def call_groq(prompt):
-    return call_chat("https://api.groq.com/openai/v1/chat/completions", env("GROQ_API_KEY"), [env("GROQ_MODEL", "openai/gpt-oss-20b"), "openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.8-27b"], prompt)
+    return call_chat("https://api.groq.com/openai/v1/chat/completions", env("GROQ_API_KEY"), ["openai/gpt-oss-20b"], prompt)
 
 def parse_ai(text):
     text = md_clean(text or "")
@@ -207,7 +197,7 @@ def process_account(addr, pw, token, chat):
         ids = data[0].split()[-5:] if data and data[0] else []
         print(addr, "Unseen:", len(ids))
         for mid in ids:
-            st, md = mail.fetch(mid, "(RFC822)")
+            st, md = mail.fetch(mid, "(BODY.PEEK[])")
             if st != "OK" or not md or not isinstance(md[0], tuple):
                 continue
             msg = email.message_from_bytes(md[0][1])
