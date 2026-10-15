@@ -1,8 +1,9 @@
 name: Gmail to Telegram
 
 on:
-  schedule:
-    - cron: "*/10 * * * *"
+  # schedule disabled — awaiting event-driven trigger setup
+  # schedule:
+  #   - cron: "*/10 * * * *"
   workflow_dispatch:
 
 concurrency:
@@ -27,4 +28,5 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          START_AT: ${{ secrets.START_AT }}
         run: python3 check_mail.py
