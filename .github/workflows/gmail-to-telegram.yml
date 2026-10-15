@@ -1,9 +1,8 @@
 name: Gmail to Telegram
 
 on:
-  # schedule disabled — awaiting event-driven trigger setup
-  # schedule:
-  #   - cron: "*/10 * * * *"
+  schedule:
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 concurrency:
