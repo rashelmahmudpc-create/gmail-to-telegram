@@ -14,10 +14,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Check Gmail and send to Telegram
+      - name: Check 3 Gmail accounts and send to Telegram
         env:
-          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
-          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          GMAIL_ADDRESS_1: ${{ secrets.GMAIL_ADDRESS_1 }}
+          GMAIL_APP_PASSWORD_1: ${{ secrets.GMAIL_APP_PASSWORD_1 }}
+          GMAIL_ADDRESS_2: ${{ secrets.GMAIL_ADDRESS_2 }}
+          GMAIL_APP_PASSWORD_2: ${{ secrets.GMAIL_APP_PASSWORD_2 }}
+          GMAIL_ADDRESS_3: ${{ secrets.GMAIL_ADDRESS_3 }}
+          GMAIL_APP_PASSWORD_3: ${{ secrets.GMAIL_APP_PASSWORD_3 }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
