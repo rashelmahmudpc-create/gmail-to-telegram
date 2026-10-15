@@ -14,7 +14,7 @@ def dec(v):
 
 def clean(t):
     t = re.sub(r"https?://\S+", "", t or "")
-    return re.sub(r"\s+", " ", t).strip()
+    return re.sub(r"[ \t]+", " ", t).strip()
 
 def body_of(msg):
     plain, html = [], []
@@ -35,34 +35,115 @@ def body_of(msg):
     h = re.sub(r"<script.*?</script>|<style.*?</style>", " ", "\n".join(html), flags=re.S | re.I)
     return clean(re.sub(r"<[^>]+>", " ", h))
 
-def esc(t):
-    t = str(t or "")
-    for ch in ["\\", "*", "_", "`", "["]:
-        t = t.replace(ch, "\\" + ch)
-    return t
+def md_clean(t):
+    t = str(t or "").replace("\\", "/")
+    for ch in ["*", "_", "`", "[", "]"]:
+        t = t.replace(ch, "")
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    return t.strip()
 
-def groq_summary(subject, sender, body):
-    key = env("GROQ_API_KEY")
+def build_prompt(subject, sender, account, body):
+    return (
+        "তুমি একজন সাহায্যকারী। কাজ: একটি ইমেইল পড়ে খুব সহজ বাংলায় বুঝিয়ে দাও। "
+        "কঠিন টেকনোলজির ইংরেজি শব্দ থাকলে সহজ বাংলায় অর্থ বুঝিয়ে বলবে। "
+        "কোনো Markdown চিহ্ন ব্যবহার করবে না। তারা, আন্ডারস্কোর, ব্যাকটিক, হ্যাশ ব্যবহার করবে না। "
+        "শুধু নিচের ৪টি লেবেল দিয়ে উত্তর দাও, প্রতিটি লেবেল নতুন লাইনে শুরু করবে:\n"
+        "সারাংশ: সহজ বাংলায় ২ থেকে ৪ বাক্যে মূল কথা\n"
+        "বিস্তারিত: মেইলটা আসলে কী বোঝাতে চাইছে, কেন পাঠানো হয়েছে\n"
+        "নিরাপত্তা: মেইলটা নিরাপদ মনে হচ্ছে কিনা, সন্দেহজনক কিছু আছে কিনা, লিংকে চাপ দেওয়া বা পাসওয়ার্ড, OTP, টাকা চাওয়া হয়েছে কিনা\n"
+        "করণীয়: ব্যবহারকারীর পরবর্তী পদক্ষেপ কী, কিছু করতে হবে কিনা পরিষ্কার করে বলো\n\n"
+        f"যে Gmail-এ এসেছে: {account}\nপাঠিয়েছে: {sender}\nবিষয়: {subject}\nইমেইল:\n{body[:7000]}"
+    )
+
+def call_gemini(prompt):
+    key = env("GEMINI_API_KEY")
     if not key:
         return None
-    prompt = "সহজ বাংলায় উত্তর দাও। ফরম্যাট:\nসারাংশ: <2-4 বাক্যে সারাংশ>\nকরণীয়: <কী করতে হবে>\n\nপাঠিয়েছেন: " + sender + "\nবিষয়: " + subject + "\nইমেইল:\n" + body[:6000]
-    data = json.dumps({"model": env("GROQ_MODEL", "llama-3.1-8b-instant"), "messages": [{"role": "user", "content": prompt}], "temperature": 0.3}).encode()
-    req = urllib.request.Request("https://api.groq.com/openai/v1/chat/completions", data=data, headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"}, method="POST")
+    model = env("GEMINI_MODEL", "gemini-2.5-flash")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+    data = json.dumps({"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"temperature": 0.3, "maxOutputTokens": 800}}).encode()
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(req, timeout=60) as r:
-        return json.loads(r.read().decode())["choices"][0]["message"]["content"].strip()
+        res = json.loads(r.read().decode())
+    return res["candidates"][0]["content"]["parts"][0]["text"].strip()
 
-def summarize(subject, sender, body):
-    try:
-        ai = groq_summary(subject, sender, body)
-    except Exception as e:
-        print("Groq failed:", e)
-        ai = None
-    if ai:
-        s = re.search(r"সারাংশ:\s*(.+)", ai)
-        a = re.search(r"করণীয়:\s*(.+)", ai)
-        return (s.group(1).strip() if s else ai), (a.group(1).strip() if a else "ইমেইলটি দেখে প্রয়োজন হলে ব্যবস্থা নিন।")
-    short = body[:700] + ("..." if len(body) > 700 else "")
-    return (short or "ইমেইলে কোনো লেখা পাওয়া যায়নি।"), "ইমেইলটি খুলে দেখে প্রয়োজন হলে ব্যবস্থা নিন।"
+def call_openai_compatible(url, key, model, prompt, extra=None):
+    if not key:
+        return None
+    headers = {"Authorization": "Bearer " + key, "Content-Type": "application/json"}
+    if extra:
+        headers.update(extra)
+    data = json.dumps({"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.3}).encode()
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=60) as r:
+        res = json.loads(r.read().decode())
+    return res["choices"][0]["message"]["content"].strip()
+
+def call_groq(prompt):
+    return call_openai_compatible("https://api.groq.com/openai/v1/chat/completions", env("GROQ_API_KEY"), env("GROQ_MODEL", "llama-3.3-70b-versatile"), prompt)
+
+def call_openrouter(prompt):
+    return call_openai_compatible("https://openrouter.ai/api/v1/chat/completions", env("OPENROUTER_API_KEY"), env("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free"), prompt, {"X-Title": "Gmail to Telegram"})
+
+def parse_ai(text):
+    text = md_clean(text or "")
+    out = {"summary": "", "detail": "", "security": "", "action": ""}
+    keys = [("সারাংশ:", "summary"), ("বিস্তারিত:", "detail"), ("নিরাপত্তা:", "security"), ("করণীয়:", "action")]
+    for i, (label, name) in enumerate(keys):
+        start = text.find(label)
+        if start == -1:
+            continue
+        start += len(label)
+        end = len(text)
+        for next_label, _ in keys[i+1:]:
+            pos = text.find(next_label, start)
+            if pos != -1:
+                end = min(end, pos)
+        out[name] = text[start:end].strip(" \n:-।")
+    if not out["summary"]:
+        out["summary"] = text[:900]
+    return out
+
+def fallback_security(body, sender):
+    low = (body or "").lower()
+    bad = ["password", "otp", "verify your account", "urgent", "suspended", "click here", "login", "bank account", "send money", "lottery", "prize", "পাসওয়ার্ড", "ওটিপি"]
+    hits = [w for w in bad if w in low]
+    if hits:
+        return "সতর্ক থাকুন। এই মেইলে পাসওয়ার্ড, OTP, লগইন বা টাকা সংক্রান্ত সন্দেহজনক কথা থাকতে পারে। কোনো লিংকে চাপ দেবেন না, পাসওয়ার্ড বা OTP দেবেন না। আগে পাঠানো ব্যক্তির ঠিকানা ভালো করে যাচাই করুন।"
+    return "মেইলটা আপাতদৃষ্টিতে স্বাভাবিক মনে হচ্ছে। তারপরও অপরিচিত লিংকে চাপ দেওয়ার আগে পাঠানো ব্যক্তির ঠিকানা যাচাই করে নিন।"
+
+def summarize(subject, sender, account, body):
+    prompt = build_prompt(subject, sender, account, body)
+    for name, fn in [("Gemini", call_gemini), ("Groq", call_groq), ("OpenRouter", call_openrouter)]:
+        try:
+            text = fn(prompt)
+            if text:
+                out = parse_ai(text)
+                if out["summary"]:
+                    if not out["detail"]:
+                        out["detail"] = out["summary"]
+                    if not out["security"]:
+                        out["security"] = fallback_security(body, sender)
+                    if not out["action"]:
+                        out["action"] = "ইমেইলটি দেখে প্রয়োজন হলে ব্যবস্থা নিন।"
+                    return out, name
+        except Exception as e:
+            print(f"{name} failed:", e)
+    short = md_clean(body)[:800] + ("..." if len(body) > 800 else "")
+    return {"summary": short or "ইমেইলে কোনো লেখা পাওয়া যায়নি।", "detail": "এই মেইলের মূল লেখা থেকেই সারাংশ দেওয়া হলো।", "security": fallback_security(body, sender), "action": "ইমেইলটি খুলে দেখে প্রয়োজন হলে ব্যবস্থা নিন।"}, "মূল ইমেইল"
+
+def make_message(account, sender, subject, out, provider):
+    return (
+        "*📧 নতুন ইমেইল এসেছে*\n\n"
+        f"*📌 বিষয়:* {md_clean(subject)}\n"
+        f"*👤 পাঠিয়েছে:* {md_clean(sender)}\n"
+        f"*📥 কোন Gmail-এ:* {md_clean(account)}\n"
+        f"*🤖 সারাংশ দিয়েছে:* {md_clean(provider)}\n\n"
+        "*📝 সহজ বাংলায় সারাংশ*\n" + md_clean(out['summary']) + "\n\n"
+        "*🔍 মেইলটা আসলে কী বোঝাতে চাইছে*\n" + md_clean(out['detail']) + "\n\n"
+        "*🛡️ নিরাপত্তা যাচাই*\n" + md_clean(out['security']) + "\n\n"
+        "*✅ আপনার পরবর্তী পদক্ষেপ*\n" + md_clean(out['action'])
+    )
 
 def send_tg(token, chat, text):
     for i in range(0, len(text), 3900):
@@ -86,8 +167,7 @@ def get_accounts():
         except Exception as e:
             print("GMAIL_ACCOUNTS_JSON parse failed:", e)
     for i in range(1, 7):
-        addr = env(f"GMAIL_ADDRESS_{i}")
-        pw = env(f"GMAIL_APP_PASSWORD_{i}").replace(" ", "")
+        addr, pw = env(f"GMAIL_ADDRESS_{i}"), env(f"GMAIL_APP_PASSWORD_{i}").replace(" ", "")
         if addr and pw:
             accounts.append((addr, pw))
     if not accounts:
@@ -119,11 +199,10 @@ def process_account(addr, pw, token, chat):
             msg = email.message_from_bytes(md[0][1])
             subject = dec(msg.get("Subject")) or "(কোনো বিষয় নেই)"
             sender = dec(msg.get("From")) or "(অজানা)"
-            summary, action = summarize(subject, sender, body_of(msg))
-            text = "*📧 নতুন ইমেইল*\n\n*যে Gmail-এ এসেছে:* " + esc(addr) + "\n*পাঠিয়েছেন:* " + esc(sender) + "\n*বিষয়:* " + esc(subject) + "\n\n*সারাংশ:*\n" + esc(summary) + "\n\n*আপনাকে যা করতে হবে:*\n" + esc(action)
-            send_tg(token, chat, text)
+            out, provider = summarize(subject, sender, addr, body_of(msg))
+            send_tg(token, chat, make_message(addr, sender, subject, out, provider))
             mail.store(mid, "+FLAGS", "\\Seen")
-            print(addr, "Sent:", subject)
+            print(addr, "Sent:", subject, "via", provider)
     finally:
         try:
             mail.logout()
