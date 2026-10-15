@@ -48,7 +48,7 @@ def call_gemini(prompt):
     key = env("GEMINI_API_KEY")
     if not key:
         return None
-    models = [env("GEMINI_MODEL", "gemini-3.6-flash"), "gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.5-flash", "gemini-2.5-pro"]
+    models = [env("GEMINI_MODEL", "gemini-3.6-flash"), "gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.5-flash"]
     seen = []
     for model in models:
         if model and model not in seen:
@@ -57,7 +57,7 @@ def call_gemini(prompt):
     for model in seen:
         try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
-            data = json.dumps({"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"temperature": 0.3, "maxOutputTokens": 900}}).encode()
+            data = json.dumps({"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"temperature": 0.3, "maxOutputTokens": 1200}}).encode()
             req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json", "x-goog-api-key": key}, method="POST")
             with urllib.request.urlopen(req, timeout=60) as r:
                 res = json.loads(r.read().decode())
@@ -67,23 +67,33 @@ def call_gemini(prompt):
             print(f"Gemini {model} failed:", e)
     raise last
 
-def call_openai_compatible(url, key, model, prompt, extra=None):
+def call_chat(url, key, models, prompt, extra=None):
     if not key:
         return None
-    headers = {"Authorization": "Bearer " + key, "Content-Type": "application/json"}
-    if extra:
-        headers.update(extra)
-    data = json.dumps({"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.3}).encode()
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=60) as r:
-        res = json.loads(r.read().decode())
-    return res["choices"][0]["message"]["content"].strip()
+    last = None
+    for model in models:
+        try:
+            headers = {"Authorization": "Bearer " + key, "Content-Type": "application/json"}
+            if extra:
+                headers.update(extra)
+            data = json.dumps({"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.3}).encode()
+            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=60) as r:
+                res = json.loads(r.read().decode())
+            msg = res["choices"][0]["message"]
+            text = (msg.get("content") or msg.get("reasoning") or "").strip()
+            if text:
+                return text
+        except Exception as e:
+            last = e
+            print(f"Model {model} failed:", e)
+    raise last
 
 def call_groq(prompt):
-    return call_openai_compatible("https://api.groq.com/openai/v1/chat/completions", env("GROQ_API_KEY"), env("GROQ_MODEL", "llama-3.3-70b-versatile"), prompt)
+    return call_chat("https://api.groq.com/openai/v1/chat/completions", env("GROQ_API_KEY"), [env("GROQ_MODEL", "openai/gpt-oss-20b"), "openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.8-27b"], prompt)
 
 def call_openrouter(prompt):
-    return call_openai_compatible("https://openrouter.ai/api/v1/chat/completions", env("OPENROUTER_API_KEY"), env("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free"), prompt, {"X-Title": "Gmail to Telegram"})
+    return call_chat("https://openrouter.ai/api/v1/chat/completions", env("OPENROUTER_API_KEY"), [env("OPENROUTER_MODEL", "openai/gpt-oss-20b:free"), "openai/gpt-oss-20b:free", "meta-llama/llama-3.3-70b-instruct:free", "google/gemma-3-27b-it:free"], prompt, {"X-Title": "Gmail to Telegram"})
 
 def parse_ai(text):
     text = md_clean(text or "")
