@@ -73,31 +73,76 @@ def send_tg(token, chat, text):
         if not res.get("ok"):
             raise RuntimeError(str(res))
 
-def main():
-    user, pw = env("GMAIL_ADDRESS"), env("GMAIL_APP_PASSWORD").replace(" ", "")
-    token, chat = env("TELEGRAM_BOT_TOKEN"), env("TELEGRAM_CHAT_ID")
-    missing = [n for n, v in [("GMAIL_ADDRESS", user), ("GMAIL_APP_PASSWORD", pw), ("TELEGRAM_BOT_TOKEN", token), ("TELEGRAM_CHAT_ID", chat)] if not v]
-    if missing:
-        raise SystemExit("Missing secrets: " + ", ".join(missing))
+def get_accounts():
+    accounts = []
+    raw = env("GMAIL_ACCOUNTS_JSON")
+    if raw:
+        try:
+            for item in json.loads(raw):
+                addr = str(item.get("address") or item.get("email") or "").strip()
+                pw = str(item.get("app_password") or item.get("password") or "").replace(" ", "")
+                if addr and pw:
+                    accounts.append((addr, pw))
+        except Exception as e:
+            print("GMAIL_ACCOUNTS_JSON parse failed:", e)
+    for i in range(1, 7):
+        addr = env(f"GMAIL_ADDRESS_{i}")
+        pw = env(f"GMAIL_APP_PASSWORD_{i}").replace(" ", "")
+        if addr and pw:
+            accounts.append((addr, pw))
+    if not accounts:
+        addr, pw = env("GMAIL_ADDRESS"), env("GMAIL_APP_PASSWORD").replace(" ", "")
+        if addr and pw:
+            accounts.append((addr, pw))
+    seen, unique = set(), []
+    for addr, pw in accounts:
+        if addr.lower() not in seen:
+            seen.add(addr.lower())
+            unique.append((addr, pw))
+    return unique
+
+def process_account(addr, pw, token, chat):
     mail = imaplib.IMAP4_SSL("imap.gmail.com", 993)
-    mail.login(user, pw)
-    mail.select("INBOX")
-    status, data = mail.search(None, "UNSEEN")
-    ids = data[0].split()[-5:] if data and data[0] else []
-    print("Unseen:", len(ids))
-    for mid in ids:
-        st, md = mail.fetch(mid, "(RFC822)")
-        if st != "OK" or not md or not isinstance(md[0], tuple):
-            continue
-        msg = email.message_from_bytes(md[0][1])
-        subject = dec(msg.get("Subject")) or "(কোনো বিষয় নেই)"
-        sender = dec(msg.get("From")) or "(অজানা)"
-        summary, action = summarize(subject, sender, body_of(msg))
-        text = "*📧 নতুন ইমেইল*\n\n*পাঠিয়েছেন:* " + esc(sender) + "\n*বিষয়:* " + esc(subject) + "\n\n*সারাংশ:*\n" + esc(summary) + "\n\n*আপনাকে যা করতে হবে:*\n" + esc(action)
-        send_tg(token, chat, text)
-        mail.store(mid, "+FLAGS", "\\Seen")
-        print("Sent:", subject)
-    mail.logout()
+    try:
+        mail.login(addr, pw)
+        mail.select("INBOX")
+        status, data = mail.search(None, "UNSEEN")
+        if status != "OK":
+            print(addr, "search failed")
+            return
+        ids = data[0].split()[-5:] if data and data[0] else []
+        print(addr, "Unseen:", len(ids))
+        for mid in ids:
+            st, md = mail.fetch(mid, "(RFC822)")
+            if st != "OK" or not md or not isinstance(md[0], tuple):
+                continue
+            msg = email.message_from_bytes(md[0][1])
+            subject = dec(msg.get("Subject")) or "(কোনো বিষয় নেই)"
+            sender = dec(msg.get("From")) or "(অজানা)"
+            summary, action = summarize(subject, sender, body_of(msg))
+            text = "*📧 নতুন ইমেইল*\n\n*যে Gmail-এ এসেছে:* " + esc(addr) + "\n*পাঠিয়েছেন:* " + esc(sender) + "\n*বিষয়:* " + esc(subject) + "\n\n*সারাংশ:*\n" + esc(summary) + "\n\n*আপনাকে যা করতে হবে:*\n" + esc(action)
+            send_tg(token, chat, text)
+            mail.store(mid, "+FLAGS", "\\Seen")
+            print(addr, "Sent:", subject)
+    finally:
+        try:
+            mail.logout()
+        except Exception:
+            pass
+
+def main():
+    token, chat = env("TELEGRAM_BOT_TOKEN"), env("TELEGRAM_CHAT_ID")
+    if not token or not chat:
+        raise SystemExit("Missing secrets: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID")
+    accounts = get_accounts()
+    if not accounts:
+        raise SystemExit("Missing Gmail accounts. Set GMAIL_ADDRESS_1/GMAIL_APP_PASSWORD_1 etc.")
+    print("Accounts:", len(accounts))
+    for addr, pw in accounts:
+        try:
+            process_account(addr, pw, token, chat)
+        except Exception as e:
+            print(f"Failed for {addr}: {e}")
 
 if __name__ == "__main__":
     main()
