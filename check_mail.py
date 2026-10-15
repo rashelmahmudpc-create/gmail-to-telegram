@@ -1,4 +1,4 @@
-import email, imaplib, json, os, re, urllib.request
+import email, html, imaplib, json, os, re, time, urllib.request
 from email.header import decode_header
 
 def env(n, d=""):
@@ -12,12 +12,26 @@ def dec(v):
         out.append(c.decode(e or "utf-8", errors="replace") if isinstance(c, bytes) else str(c))
     return "".join(out).strip()
 
+def strip_html(h):
+    h = h or ""
+    h = re.sub(r"<!--.*?-->", " ", h, flags=re.S)
+    h = re.sub(r"<!\[if.*?<!\[endif\]>", " ", h, flags=re.S | re.I)
+    h = re.sub(r"<script.*?</script>|<style.*?</style>", " ", h, flags=re.S | re.I)
+    h = re.sub(r"<(br|/p|/div|/tr|/li|/h[1-6])[^>]*>", "\n", h, flags=re.I)
+    h = re.sub(r"<[^>]+>", " ", h)
+    h = html.unescape(h)
+    return h
+
 def clean(t):
-    t = re.sub(r"https?://\S+", "", t or "")
-    return re.sub(r"[ \t]+", " ", t).strip()
+    t = strip_html(t or "")
+    t = re.sub(r"https?://\S+", "", t)
+    t = t.replace("\u00a0", " ").replace("\u2007", " ").replace("\u202f", " ").replace("\ufeff", "")
+    t = re.sub(r"[ \t]+", " ", t)
+    t = re.sub(r"\n\s*\n+", "\n\n", t)
+    return t.strip()
 
 def body_of(msg):
-    plain, html = [], []
+    plain, htmls = [], []
     parts = msg.walk() if msg.is_multipart() else [msg]
     for p in parts:
         if "attachment" in str(p.get("Content-Disposition") or ""):
@@ -29,42 +43,53 @@ def body_of(msg):
         if p.get_content_type() == "text/plain":
             plain.append(txt)
         elif p.get_content_type() == "text/html":
-            html.append(txt)
+            htmls.append(txt)
     if plain:
         return clean("\n".join(plain))
-    h = re.sub(r"<script.*?</script>|<style.*?</style>", " ", "\n".join(html), flags=re.S | re.I)
-    return clean(re.sub(r"<[^>]+>", " ", h))
+    return clean(strip_html("\n".join(htmls)))
 
 def md_clean(t):
     t = str(t or "").replace("\\", "/")
     for ch in ["*", "_", "`", "[", "]"]:
         t = t.replace(ch, "")
-    return re.sub(r"\n{3,}", "\n\n", t).strip()
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    return t.strip()
 
 def build_prompt(subject, sender, account, body):
     return ("তুমি একজন সাহায্যকারী। কাজ: একটি ইমেইল পড়ে খুব সহজ বাংলায় বুঝিয়ে দাও। কঠিন টেকনোলজির ইংরেজি শব্দ থাকলে সহজ বাংলায় অর্থ বুঝিয়ে বলবে। কোনো Markdown চিহ্ন ব্যবহার করবে না। তারা, আন্ডারস্কোর, ব্যাকটিক, হ্যাশ ব্যবহার করবে না। শুধু নিচের ৪টি লেবেল দিয়ে উত্তর দাও, প্রতিটি লেবেল নতুন লাইনে শুরু করবে:\nসারাংশ: সহজ বাংলায় ২ থেকে ৪ বাক্যে মূল কথা\nবিস্তারিত: মেইলটা আসলে কী বোঝাতে চাইছে, কেন পাঠানো হয়েছে\nনিরাপত্তা: মেইলটা নিরাপদ মনে হচ্ছে কিনা, সন্দেহজনক কিছু আছে কিনা, লিংকে চাপ দেওয়া বা পাসওয়ার্ড, OTP, টাকা চাওয়া হয়েছে কিনা\nকরণীয়: ব্যবহারকারীর পরবর্তী পদক্ষেপ কী, কিছু করতে হবে কিনা পরিষ্কার করে বলো\n\n" + f"যে Gmail-এ এসেছে: {account}\nপাঠিয়েছে: {sender}\nবিষয়: {subject}\nইমেইল:\n{body[:7000]}")
+
+def http_json(url, data, headers, timeout=60):
+    req = urllib.request.Request(url, data=json.dumps(data).encode(), headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode())
+
+def gemini_once(model, key, prompt):
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+    res = http_json(url, {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"temperature": 0.3, "maxOutputTokens": 1200}}, {"Content-Type": "application/json", "x-goog-api-key": key})
+    parts = res["candidates"][0]["content"].get("parts", [])
+    text = "".join([p.get("text", "") for p in parts]).strip()
+    if not text:
+        raise RuntimeError("Gemini empty text")
+    return text
 
 def call_gemini(prompt):
     key = env("GEMINI_API_KEY")
     if not key:
         return None
-    models = [env("GEMINI_MODEL", "gemini-3.6-flash"), "gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.5-flash"]
+    models = [env("GEMINI_MODEL", "gemini-3.6-flash"), "gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.5-flash", "gemini-2.0-flash"]
     seen = []
-    for model in models:
-        if model and model not in seen:
-            seen.append(model)
+    for m in models:
+        if m and m not in seen:
+            seen.append(m)
     last = None
     for model in seen:
-        try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
-            data = json.dumps({"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"temperature": 0.3, "maxOutputTokens": 1200}}).encode()
-            req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json", "x-goog-api-key": key}, method="POST")
-            with urllib.request.urlopen(req, timeout=60) as r:
-                res = json.loads(r.read().decode())
-            return res["candidates"][0]["content"]["parts"][0]["text"].strip()
-        except Exception as e:
-            last = e
-            print(f"Gemini {model} failed:", e)
+        for attempt in range(2):
+            try:
+                return gemini_once(model, key, prompt)
+            except Exception as e:
+                last = e
+                print(f"Gemini {model} attempt {attempt+1} failed:", e)
+                time.sleep(3 + attempt * 5)
     raise last
 
 def call_chat(url, key, models, prompt, extra=None):
@@ -76,24 +101,22 @@ def call_chat(url, key, models, prompt, extra=None):
             headers = {"Authorization": "Bearer " + key, "Content-Type": "application/json"}
             if extra:
                 headers.update(extra)
-            data = json.dumps({"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.3}).encode()
-            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-            with urllib.request.urlopen(req, timeout=60) as r:
-                res = json.loads(r.read().decode())
+            res = http_json(url, {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.3}, headers)
             msg = res["choices"][0]["message"]
             text = (msg.get("content") or msg.get("reasoning") or "").strip()
             if text:
                 return text
+            raise RuntimeError("empty content")
         except Exception as e:
             last = e
             print(f"Model {model} failed:", e)
     raise last
 
+def call_openrouter(prompt):
+    return call_chat("https://openrouter.ai/api/v1/chat/completions", env("OPENROUTER_API_KEY"), [env("OPENROUTER_MODEL", "openrouter/free"), "openrouter/free"], prompt, {"X-Title": "Gmail to Telegram"})
+
 def call_groq(prompt):
     return call_chat("https://api.groq.com/openai/v1/chat/completions", env("GROQ_API_KEY"), [env("GROQ_MODEL", "openai/gpt-oss-20b"), "openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.8-27b"], prompt)
-
-def call_openrouter(prompt):
-    return call_chat("https://openrouter.ai/api/v1/chat/completions", env("OPENROUTER_API_KEY"), [env("OPENROUTER_MODEL", "openai/gpt-oss-20b:free"), "openai/gpt-oss-20b:free", "meta-llama/llama-3.3-70b-instruct:free", "google/gemma-3-27b-it:free"], prompt, {"X-Title": "Gmail to Telegram"})
 
 def parse_ai(text):
     text = md_clean(text or "")
@@ -110,8 +133,8 @@ def parse_ai(text):
             if pos != -1:
                 end = min(end, pos)
         out[name] = text[start:end].strip(" \n:-।")
-    if not out["summary"]:
-        out["summary"] = text[:900]
+    if len(out["summary"]) < 10:
+        out["summary"] = ""
     return out
 
 def fallback_security(body, sender):
@@ -124,7 +147,7 @@ def fallback_security(body, sender):
 
 def summarize(subject, sender, account, body):
     prompt = build_prompt(subject, sender, account, body)
-    for name, fn in [("Gemini", call_gemini), ("Groq", call_groq), ("OpenRouter", call_openrouter)]:
+    for name, fn in [("Gemini", call_gemini), ("OpenRouter", call_openrouter), ("Groq", call_groq)]:
         try:
             text = fn(prompt)
             if text:
@@ -137,10 +160,11 @@ def summarize(subject, sender, account, body):
                     if not out["action"]:
                         out["action"] = "ইমেইলটি দেখে প্রয়োজন হলে ব্যবস্থা নিন।"
                     return out, name
+                else:
+                    print(f"{name} gave empty summary, trying next fallback")
         except Exception as e:
-            print(f"{name} failed:", e)
-    short = md_clean(body)[:800] + ("..." if len(body) > 800 else "")
-    return {"summary": short or "ইমেইলে কোনো লেখা পাওয়া যায়নি।", "detail": "এই মেইলের মূল লেখা থেকেই সারাংশ দেওয়া হলো।", "security": fallback_security(body, sender), "action": "ইমেইলটি খুলে দেখে প্রয়োজন হলে ব্যবস্থা নিন।"}, "মূল ইমেইল"
+            print(f"{name} failed, trying next fallback:", e)
+    return None, None
 
 def make_message(account, sender, subject, out, provider):
     return ("*📧 নতুন ইমেইল এসেছে*\n\n" + f"*📌 বিষয়:* {md_clean(subject)}\n" + f"*👤 পাঠিয়েছে:* {md_clean(sender)}\n" + f"*📥 কোন Gmail-এ:* {md_clean(account)}\n" + f"*🤖 সারাংশ দিয়েছে:* {md_clean(provider)}\n\n" + "*📝 সহজ বাংলায় সারাংশ*\n" + md_clean(out['summary']) + "\n\n" + "*🔍 মেইলটা আসলে কী বোঝাতে চাইছে*\n" + md_clean(out['detail']) + "\n\n" + "*🛡️ নিরাপত্তা যাচাই*\n" + md_clean(out['security']) + "\n\n" + "*✅ আপনার পরবর্তী পদক্ষেপ*\n" + md_clean(out['action']))
@@ -156,16 +180,6 @@ def send_tg(token, chat, text):
 
 def get_accounts():
     accounts = []
-    raw = env("GMAIL_ACCOUNTS_JSON")
-    if raw:
-        try:
-            for item in json.loads(raw):
-                addr = str(item.get("address") or item.get("email") or "").strip()
-                pw = str(item.get("app_password") or item.get("password") or "").replace(" ", "")
-                if addr and pw:
-                    accounts.append((addr, pw))
-        except Exception as e:
-            print("GMAIL_ACCOUNTS_JSON parse failed:", e)
     for i in range(1, 7):
         addr, pw = env(f"GMAIL_ADDRESS_{i}"), env(f"GMAIL_APP_PASSWORD_{i}").replace(" ", "")
         if addr and pw:
@@ -200,9 +214,13 @@ def process_account(addr, pw, token, chat):
             subject = dec(msg.get("Subject")) or "(কোনো বিষয় নেই)"
             sender = dec(msg.get("From")) or "(অজানা)"
             out, provider = summarize(subject, sender, addr, body_of(msg))
+            if not out:
+                print(f"SKIP no LLM succeeded, not sending and not marking seen: {addr} | {subject}")
+                continue
             send_tg(token, chat, make_message(addr, sender, subject, out, provider))
             mail.store(mid, "+FLAGS", "\\Seen")
             print(addr, "Sent:", subject, "via", provider)
+            time.sleep(2)
     finally:
         try:
             mail.logout()
@@ -215,7 +233,7 @@ def main():
         raise SystemExit("Missing secrets: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID")
     accounts = get_accounts()
     if not accounts:
-        raise SystemExit("Missing Gmail accounts. Set GMAIL_ADDRESS_1/GMAIL_APP_PASSWORD_1 etc.")
+        raise SystemExit("Missing Gmail accounts")
     print("Accounts:", len(accounts))
     for addr, pw in accounts:
         try:
